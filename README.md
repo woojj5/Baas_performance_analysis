@@ -86,7 +86,7 @@
 ---
 
 **최종 업데이트**: 2025-12-24
-**분석 엔진**: BASS v3.0 (Best-Ever Strict Self-Referenced Engine)
+**버전**: BASS v3.0
 
 ## 6. 분석 알고리즘 및 수학적 근거 (Mathematical Rationale)
 
