@@ -105,6 +105,16 @@ def generate_visuals():
     sk_res, sk_df = process_data(SK_SES_PATH, "SK")
     all_res = pd.concat([bw_res, sk_res])
     
+    # [보완 1] 표본 수(N) 명시: 차종별 차량 대수 계산
+    counts = all_res['car_type'].value_counts()
+    all_res['car_type_label'] = all_res['car_type'].apply(lambda x: f"{x} (N={counts[x]})")
+    
+    # [보완 3] 신뢰도 등급화 (데이터 기간 기반 불확실성 명시)
+    def get_reliability(row):
+        if row['obs_days'] < 300: return '⚠️ Estimated (Low Confidence)'
+        return '✅ Verified (High Confidence)'
+    all_res['data_reliability'] = all_res.apply(get_reliability, axis=1)
+    
     # [v4.2] Fleet-Relative Normalization
     # 전체 차량의 중앙값(Fleet Median)을 계산하여 공통적인 계절/환경 이득을 제거
     fleet_median_velocity = all_res['annual_rate'].median()
@@ -164,52 +174,33 @@ def generate_visuals():
     plt.savefig(ROOT_DIR / "trend_based_aging_analysis.jpg", dpi=300)
     print("Regenerated: trend_based_aging_analysis.jpg")
 
-    # 3. car_type_aging_trend_diagnostic.jpg (사격판 진단 지도 - v4.3.1 점 복구 및 로직 정상화)
+    # 3. car_type_aging_trend_diagnostic.jpg (사격판 진단 지도)
     plt.figure(figsize=(16, 12))
     
-    # 리스크 판정 기준 (Strict Thresholds)
-    # 현재 리텐션 95% 미만이면서(보수적 상향), 연간 노화율이 Fleet 평균보다 4% 이상 낮은 경우
-    crit_retention = 95 
-    crit_velocity = -4
-    
-    # 색상 구분을 위한 리스크 태그 생성
-    def get_risk_level(row):
-        if row['relative_retention'] < crit_retention and row['relative_velocity'] < crit_velocity:
-            return 'High Risk'
-        if row['relative_velocity'] < crit_velocity:
-            return 'Fast Aging'
-        if row['relative_retention'] < crit_retention:
-            return 'Low Performance'
-        return 'Normal'
-    
-    all_res['risk_level'] = all_res.apply(get_risk_level, axis=1)
-    
-    # 시각화
+    # [보완 1, 3 반영] 차종(N) 및 신뢰도 등급 표시
     sns.scatterplot(data=all_res, x='relative_retention', y='relative_velocity', 
-                    hue='risk_level', size='obs_days', sizes=(50, 600), 
-                    palette={'High Risk': 'red', 'Fast Aging': 'orange', 'Low Performance': 'blue', 'Normal': 'lightgray'},
-                    alpha=0.7)
+                    hue='car_type_label', style='data_reliability', 
+                    size='obs_days', sizes=(50, 600), alpha=0.7)
     
     plt.axvline(100, color='black', linestyle='-', alpha=0.3)
     plt.axhline(0, color='black', linestyle='-', alpha=0.3)
     
-    # 가이드라인 점선
-    plt.axvline(crit_retention, color='red', linestyle=':', alpha=0.3)
-    plt.axhline(crit_velocity, color='red', linestyle=':', alpha=0.3)
+    # 영역 가이드라인 및 설명 (v4.3.1 기준 유지)
+    plt.axvline(95, color='red', linestyle=':', alpha=0.3)
+    plt.axhline(-4, color='red', linestyle=':', alpha=0.3)
     
-    # 영역 설명
     plt.text(102, 3, 'Healthy Fleet', fontsize=18, color='green', weight='bold', alpha=0.6)
-    plt.text(crit_retention - 15, crit_velocity - 8, 'CRITICAL: High Risk', fontsize=18, color='red', weight='bold')
-    plt.text(102, crit_velocity - 8, 'Monitoring: Fast Aging', fontsize=15, color='orange', weight='bold')
+    plt.text(80, -12, 'CRITICAL: High Risk', fontsize=18, color='red', weight='bold')
+    plt.text(102, -12, 'Monitoring: Fast Aging', fontsize=15, color='orange', weight='bold')
     
-    plt.title('Vehicle Diagnostic Map (Outlier Targeting v4.3.1)\n[Fleet-Relative Status vs. Velocity]', fontsize=22)
+    plt.title('Vehicle Diagnostic Map (Status vs. Velocity)\n[Fleet-Relative Status vs. Velocity]', fontsize=22)
     plt.xlabel('Relative Retention (%) [100% = Fleet Median]', fontsize=14)
-    plt.ylabel('Relative Aging Velocity (%/year) [0% = Fleet Median]', fontsize=14)
+    plt.ylabel('Relative Aging Velocity (% / year) [0% = Fleet Median]', fontsize=14) # [보완 2 반영] 단위 명시
     
     plt.ylim(-20, 15)
-    plt.xlim(75, 115) # X축 범위를 100% 중심으로 정상화 (점 복구)
+    plt.xlim(75, 115) 
     
-    plt.legend(title='Diagnostic Result', loc='upper left')
+    plt.legend(title='Car Type (N) & Data Reliability', bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='small', ncol=1)
     plt.grid(True, which='both', linestyle='--', alpha=0.2)
     plt.tight_layout()
     plt.savefig(ROOT_DIR / "car_type_aging_trend_diagnostic.jpg", dpi=300)
@@ -245,12 +236,13 @@ def generate_visuals():
     plt.savefig(ROOT_DIR / "stress_impact_analysis.jpg", dpi=300)
     print("Regenerated: stress_impact_analysis.jpg")
 
-    # 6. car_type_individual_diagnostic.jpg (차종별 분포 상세 - 추가)
+    # 6. car_type_individual_diagnostic.jpg (차종별 분포 상세)
     plt.figure(figsize=(20, 10))
-    sns.violinplot(data=all_res, x='car_type', y='current_retention', order=order, inner="quart", palette='pastel')
-    sns.stripplot(data=all_res, x='car_type', y='current_retention', order=order, color='black', size=3, alpha=0.3)
+    sns.violinplot(data=all_res, x='car_type_label', y='current_retention', order=sorted(all_res['car_type_label'].unique()), inner="quart", palette='pastel')
+    sns.stripplot(data=all_res, x='car_type_label', y='current_retention', order=sorted(all_res['car_type_label'].unique()), color='black', size=3, alpha=0.3)
     plt.axhline(100, color='red', linestyle='--', alpha=0.6)
-    plt.title('Detailed Performance Distribution by Car Type', fontsize=18)
+    plt.title('Detailed Performance Distribution by Car Type (N shown)', fontsize=18)
+    plt.ylabel('Current Retention (%)', fontsize=14)
     plt.xticks(rotation=45, ha='right')
     plt.tight_layout()
     plt.savefig(ROOT_DIR / "car_type_individual_diagnostic.jpg", dpi=300)
