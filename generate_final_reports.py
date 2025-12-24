@@ -49,25 +49,43 @@ def process_data(ses_path, label):
         
         if len(group_clean) < 20: continue
         
-        # [Best-Ever Baseline] 초기 100세션 중 가장 효율이 좋았던(낮은 kWh/km) 20세션의 중앙값
-        # 이를 통해 운전자가 가장 잘 탔을 때를 100%로 설정하여, 이후의 '회춘' 현상을 억제함
+        # [Best-Ever Baseline] 초기 100세션 중 상위 10%~30% 구간의 중앙값 사용
+        # (absolute best 20개는 이상치일 확률이 높으므로, 약간 더 현실적인 상위권으로 조정)
         first_100 = group_clean.head(100)
-        initial_kwh = first_100['smooth_kwh'].nsmallest(20).median()
+        initial_kwh = first_100['smooth_kwh'].nsmallest(30).iloc[10:30].median()
         
         current_kwh = group_clean.tail(15)['smooth_kwh'].mean()
-        
         current_retention = (initial_kwh / current_kwh) * 100
         total_drop = current_retention - 100
         
         # 주행 스트레스 (해당 차량의 평균 스트레스)
         avg_stress = group['payload_stress_index'].mean()
         
-        # 일일 변화율 (Regression) - Best-Ever Baseline 대비 상대 성능으로 계산
+        # 일일 변화율 및 연간 환산 (Shrinkage 적용)
         days = (group_clean['time'] - group_clean['time'].min()).dt.days.values.reshape(-1, 1)
         rel_perf_series = (initial_kwh / group_clean['smooth_kwh']) * 100
         huber = HuberRegressor().fit(days, rel_perf_series)
-        daily_slope = huber.coef_[0]
         
+        # 일일 변화율 및 연간 환산 (Shrinkage 적용)
+        days = (group_clean['time'] - group_clean['time'].min()).dt.days.values.reshape(-1, 1)
+        rel_perf_series = (initial_kwh / group_clean['smooth_kwh']) * 100
+        huber = HuberRegressor().fit(days, rel_perf_series)
+        
+        # [v4.1] 데이터 진실성 (Data Integrity) 모델
+        # 1. 신뢰도 계산: 관측 기간이 길수록 추세를 더 신뢰함 (500일 기준)
+        confidence = min(1.0, (obs_days / 500.0) ** 2)
+        
+        # 2. 블렌딩: 신뢰도가 낮으면 보수적인 0% 근처로, 높으면 실제 추세로 이동
+        # (양수/음수 차별 없이 데이터의 실제 기울기를 존중함)
+        raw_annual_rate = huber.coef_[0] * 365
+        adj_annual_rate = raw_annual_rate * confidence
+        
+        # 3. 극단적 이상치 소프트 제어 (물리적 한계 밖의 노이즈만 제어)
+        if adj_annual_rate < -25.0:
+            adj_annual_rate = -25.0 + (adj_annual_rate + 25.0) * 0.2
+        if adj_annual_rate > 15.0:
+            adj_annual_rate = 15.0 + (adj_annual_rate - 15.0) * 0.2
+            
         results.append({
             'dev_id': dev_id,
             'car_type': group['car_type'].iloc[0],
@@ -75,22 +93,32 @@ def process_data(ses_path, label):
             'total_drop_pct': total_drop,
             'current_retention': current_retention,
             'avg_payload_stress': avg_stress,
-            'daily_slope': daily_slope,
+            'annual_rate': adj_annual_rate,
             'data_source': label
         })
         
     return pd.DataFrame(results), df
 
 def generate_visuals():
+    # 1. 데이터 처리 (기존 로직)
     bw_res, bw_df = process_data(BW_SES_PATH, "BW")
     sk_res, sk_df = process_data(SK_SES_PATH, "SK")
-    
     all_res = pd.concat([bw_res, sk_res])
+    
+    # [v4.2] Fleet-Relative Normalization
+    # 전체 차량의 중앙값(Fleet Median)을 계산하여 공통적인 계절/환경 이득을 제거
+    fleet_median_velocity = all_res['annual_rate'].median()
+    all_res['relative_velocity'] = all_res['annual_rate'] - fleet_median_velocity
+    
+    # Fleet Median 기준 현재 Retention도 재보정 (상대적 건강도, 100% 중심)
+    fleet_median_retention = all_res['current_retention'].median()
+    all_res['relative_retention'] = all_res['current_retention'] - (fleet_median_retention - 100)
     
     plt.switch_backend('Agg')
     sns.set_style('whitegrid')
 
     # 1. final_refined_aging_report.jpg (분포 중심)
+    # ... (기존 히스토그램 로직 유지하되 지표만 변경 가능)
     plt.figure(figsize=(16, 8))
     plt.subplot(1, 2, 1)
     sns.histplot(all_res['total_drop_pct'], kde=True, color='teal', bins=30)
@@ -107,8 +135,9 @@ def generate_visuals():
     print("Regenerated: final_refined_aging_report.jpg")
 
     # 2. trend_based_aging_analysis.jpg (개별 추세)
-    targets = pd.concat([all_res.sort_values('daily_slope').head(3), 
-                         all_res.sort_values('daily_slope', ascending=False).head(3)])
+    # daily_slope 대신 annual_rate 기준으로 정렬
+    targets = pd.concat([all_res.sort_values('annual_rate').head(3), 
+                         all_res.sort_values('annual_rate', ascending=False).head(3)])
     plt.figure(figsize=(24, 14))
     for i, (idx, row) in enumerate(targets.iterrows()):
         dev_id, src = row['dev_id'], row['data_source']
@@ -135,26 +164,53 @@ def generate_visuals():
     plt.savefig(ROOT_DIR / "trend_based_aging_analysis.jpg", dpi=300)
     print("Regenerated: trend_based_aging_analysis.jpg")
 
-    # 3. car_type_aging_trend_diagnostic.jpg (사격판 진단 지도)
-    # X축: 현재 성능 유지율(Status), Y축: 연간 노화 추세(Velocity)
-    all_res['annual_rate'] = all_res['daily_slope'] * 365
+    # 3. car_type_aging_trend_diagnostic.jpg (사격판 진단 지도 - v4.3.1 점 복구 및 로직 정상화)
     plt.figure(figsize=(16, 12))
-    sns.scatterplot(data=all_res, x='current_retention', y='annual_rate', 
-                    hue='car_type', size='obs_days', sizes=(50, 500), alpha=0.6)
     
-    plt.axvline(100, color='gray', linestyle='--', alpha=0.5)
-    plt.axhline(0, color='gray', linestyle='--', alpha=0.5)
+    # 리스크 판정 기준 (Strict Thresholds)
+    # 현재 리텐션 95% 미만이면서(보수적 상향), 연간 노화율이 Fleet 평균보다 4% 이상 낮은 경우
+    crit_retention = 95 
+    crit_velocity = -4
     
-    # 영역 구분 (사격판 논리)
-    plt.text(102, 1, 'Stable & Best', fontsize=15, color='green', weight='bold')
-    plt.text(90, -5, 'High Risk (Fast Aging)', fontsize=15, color='red', weight='bold')
-    plt.text(102, -5, 'Monitoring Needed', fontsize=15, color='orange', weight='bold')
+    # 색상 구분을 위한 리스크 태그 생성
+    def get_risk_level(row):
+        if row['relative_retention'] < crit_retention and row['relative_velocity'] < crit_velocity:
+            return 'High Risk'
+        if row['relative_velocity'] < crit_velocity:
+            return 'Fast Aging'
+        if row['relative_retention'] < crit_retention:
+            return 'Low Performance'
+        return 'Normal'
     
-    plt.title('Vehicle Diagnostic Target Map (Status vs. Velocity)', fontsize=20)
-    plt.xlabel('Current Retention (%) [Health Status]', fontsize=14)
-    plt.ylabel('Annual Aging Rate (%) [Degradation Velocity]', fontsize=14)
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='small', ncol=2)
-    plt.grid(True, which='both', linestyle='--', alpha=0.3)
+    all_res['risk_level'] = all_res.apply(get_risk_level, axis=1)
+    
+    # 시각화
+    sns.scatterplot(data=all_res, x='relative_retention', y='relative_velocity', 
+                    hue='risk_level', size='obs_days', sizes=(50, 600), 
+                    palette={'High Risk': 'red', 'Fast Aging': 'orange', 'Low Performance': 'blue', 'Normal': 'lightgray'},
+                    alpha=0.7)
+    
+    plt.axvline(100, color='black', linestyle='-', alpha=0.3)
+    plt.axhline(0, color='black', linestyle='-', alpha=0.3)
+    
+    # 가이드라인 점선
+    plt.axvline(crit_retention, color='red', linestyle=':', alpha=0.3)
+    plt.axhline(crit_velocity, color='red', linestyle=':', alpha=0.3)
+    
+    # 영역 설명
+    plt.text(102, 3, 'Healthy Fleet', fontsize=18, color='green', weight='bold', alpha=0.6)
+    plt.text(crit_retention - 15, crit_velocity - 8, 'CRITICAL: High Risk', fontsize=18, color='red', weight='bold')
+    plt.text(102, crit_velocity - 8, 'Monitoring: Fast Aging', fontsize=15, color='orange', weight='bold')
+    
+    plt.title('Vehicle Diagnostic Map (Outlier Targeting v4.3.1)\n[Fleet-Relative Status vs. Velocity]', fontsize=22)
+    plt.xlabel('Relative Retention (%) [100% = Fleet Median]', fontsize=14)
+    plt.ylabel('Relative Aging Velocity (%/year) [0% = Fleet Median]', fontsize=14)
+    
+    plt.ylim(-20, 15)
+    plt.xlim(75, 115) # X축 범위를 100% 중심으로 정상화 (점 복구)
+    
+    plt.legend(title='Diagnostic Result', loc='upper left')
+    plt.grid(True, which='both', linestyle='--', alpha=0.2)
     plt.tight_layout()
     plt.savefig(ROOT_DIR / "car_type_aging_trend_diagnostic.jpg", dpi=300)
     print("Regenerated: car_type_aging_trend_diagnostic.jpg")
