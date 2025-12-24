@@ -85,4 +85,3 @@
 
 ---
 **최종 업데이트**: 2025-12-24
-**분석 엔진**: BASS v3.0 (Best-Ever Strict Self-Referenced Engine)
