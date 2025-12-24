@@ -37,7 +37,7 @@
     1.  **지표의 이원화**: 현재 상태를 나타내는 **'총 성능 변화량(Total Change)'**과 미래 추세를 나타내는 **'노화 속도(Velocity)'**를 분리하여 관리합니다.
     2.  **Best-Ever Baseline**: 초기 100세션 중 최상위 효율 구간을 100%로 설정하여, 운전 습관 개선에 의한 '가짜 성능 향상'을 제거하고 순수 노화 추세를 검출합니다.
     3.  **Huber Robust Regression**: 이상치(Outlier)에 둔감한 Huber 손실 함수를 사용하여 단기 노이즈가 전체 기울기를 왜곡하지 않도록 방어합니다.
-*   **결과**: ![Trend Analysis](trend_based_aging_analysis.jpg) (물리적으로 타당한 우하향 노화 궤적 확보)
+*   **결과**: ![Refined Aging Distribution](final_refined_aging_report.jpg) (현실적인 노화 수치 분포 확보)
 
 ### Issue 2: 상용차의 억울한 저득점 (과적 vs 노화)
 *   **문제**: 포터2, 봉고3 등 상용차가 배터리는 건강함에도 무거운 짐을 실어 전비가 낮게 측정되어 '노화 고위험군'으로 오진됨.
